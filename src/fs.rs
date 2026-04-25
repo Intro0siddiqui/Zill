@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use serde::{Serialize, Deserialize, Serializer};
+use serde::{Serialize, Deserialize, Serializer, Deserializer};
 use chrono::{DateTime, Utc};
 use crate::error::ZillError;
 use path_clean::PathClean;
 
+/// Metadata for a file in the VirtualFs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMeta {
     pub size: usize,
@@ -13,6 +14,7 @@ pub struct FileMeta {
     pub content: Vec<u8>,
 }
 
+/// Metadata for a directory in the VirtualFs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirMeta {
     pub created_at: DateTime<Utc>,
@@ -20,6 +22,7 @@ pub struct DirMeta {
     pub children: HashSet<String>,
 }
 
+/// A node in the VirtualFs tree, either a file or a directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Node {
     File(FileMeta),
@@ -27,15 +30,18 @@ pub enum Node {
 }
 
 impl Node {
+    /// Returns true if the node is a directory.
     pub fn is_dir(&self) -> bool {
         matches!(self, Node::Directory(_))
     }
 
+    /// Returns true if the node is a file.
     pub fn is_file(&self) -> bool {
         matches!(self, Node::File(_))
     }
 }
 
+/// An in-memory virtual file system.
 #[derive(Serialize, Deserialize)]
 pub struct VirtualFs {
     pub nodes: HashMap<PathBuf, Node>,
@@ -43,7 +49,8 @@ pub struct VirtualFs {
     pub max_file_size: usize,
 }
 
-#[derive(Serialize)]
+/// A node representation used for nested JSON serialization.
+#[derive(Serialize, Deserialize)]
 pub struct NestedNode {
     pub name: String,
     pub node: Node,
@@ -51,6 +58,7 @@ pub struct NestedNode {
 }
 
 impl VirtualFs {
+    /// Creates a new empty VirtualFs with the specified resource limits.
     pub fn new(max_nodes: usize, max_file_size: usize) -> Self {
         let mut nodes = HashMap::new();
         let now = Utc::now();
@@ -69,6 +77,7 @@ impl VirtualFs {
         }
     }
 
+    /// Canonicalizes a path relative to the current working directory.
     pub fn canonicalize(&self, path: &Path, cwd: &Path) -> PathBuf {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
@@ -82,10 +91,12 @@ impl VirtualFs {
         cleaned
     }
 
+    /// Returns the metadata for the node at the specified path.
     pub fn stat(&self, path: &Path) -> Result<&Node, ZillError> {
         self.nodes.get(path).ok_or_else(|| ZillError::NotFound(path.display().to_string()))
     }
 
+    /// Recursively creates directories for the specified path.
     pub fn mkdir_p(&mut self, path: &Path) -> Result<(), ZillError> {
         let mut current = PathBuf::from("/");
         for component in path.components() {
@@ -125,6 +136,7 @@ impl VirtualFs {
         Ok(())
     }
 
+    /// Creates a new file at the specified path with the given content.
     pub fn create_file(&mut self, path: &Path, content: Vec<u8>) -> Result<(), ZillError> {
         if content.len() > self.max_file_size {
             return Err(ZillError::FileTooLarge);
@@ -163,6 +175,7 @@ impl VirtualFs {
         Ok(())
     }
 
+    /// Reads the content of the file at the specified path.
     pub fn read(&self, path: &Path) -> Result<&[u8], ZillError> {
         match self.stat(path)? {
             Node::File(meta) => Ok(&meta.content),
@@ -170,6 +183,7 @@ impl VirtualFs {
         }
     }
 
+    /// Writes content to a file at the specified path, creating it if it doesn't exist.
     pub fn write(&mut self, path: &Path, content: Vec<u8>) -> Result<(), ZillError> {
         if content.len() > self.max_file_size {
             return Err(ZillError::FileTooLarge);
@@ -187,6 +201,7 @@ impl VirtualFs {
         }
     }
 
+    /// Returns a sorted list of entry names in the specified directory.
     pub fn list_dir(&self, path: &Path) -> Result<Vec<String>, ZillError> {
         match self.stat(path)? {
             Node::Directory(meta) => {
@@ -198,6 +213,7 @@ impl VirtualFs {
         }
     }
 
+    /// Removes a file or an empty directory at the specified path.
     pub fn remove(&mut self, path: &Path) -> Result<(), ZillError> {
         if path == Path::new("/") {
             return Err(ZillError::PermissionDenied("Cannot remove root".into()));
@@ -222,12 +238,57 @@ impl VirtualFs {
         Ok(())
     }
 
+    /// Serializes the VirtualFs into a nested tree structure for better readability.
     pub fn serialize_nested<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
+        #[derive(Serialize)]
+        struct NestedVfs {
+            nodes: NestedNode,
+            max_nodes: usize,
+            max_file_size: usize,
+        }
+
         let root = self.get_nested_node(Path::new("/"), "/").map_err(serde::ser::Error::custom)?;
-        root.serialize(serializer)
+        let nested = NestedVfs {
+            nodes: root,
+            max_nodes: self.max_nodes,
+            max_file_size: self.max_file_size,
+        };
+        nested.serialize(serializer)
+    }
+
+    /// Deserializes the VirtualFs from a nested tree structure.
+    pub fn deserialize_nested<'de, D>(deserializer: D) -> Result<VirtualFs, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct NestedVfs {
+            nodes: NestedNode,
+            max_nodes: usize,
+            max_file_size: usize,
+        }
+
+        let nested: NestedVfs = Deserialize::deserialize(deserializer)?;
+        let mut nodes = HashMap::new();
+        Self::flatten_nested_node(Path::new("/"), nested.nodes, &mut nodes);
+        Ok(VirtualFs {
+            nodes,
+            max_nodes: nested.max_nodes,
+            max_file_size: nested.max_file_size,
+        })
+    }
+
+    fn flatten_nested_node(path: &Path, nested: NestedNode, nodes: &mut HashMap<PathBuf, Node>) {
+        nodes.insert(path.to_path_buf(), nested.node);
+        if let Some(children) = nested.children {
+            for child in children {
+                let child_path = path.join(&child.name);
+                Self::flatten_nested_node(&child_path, child, nodes);
+            }
+        }
     }
 
     fn get_nested_node(&self, path: &Path, name: &str) -> Result<NestedNode, ZillError> {

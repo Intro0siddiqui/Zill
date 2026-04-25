@@ -6,14 +6,19 @@ use crate::limits::ZillLimits;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
+/// Result of a command execution in the Zill shell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CmdOutput {
+    /// Text written to standard output.
     pub stdout: String,
+    /// Text written to standard error.
     pub stderr: String,
+    /// Process exit code (0 for success).
     pub exit_code: i32,
 }
 
 impl CmdOutput {
+    /// Creates a successful command output with the given stdout.
     pub fn success(stdout: String) -> Self {
         CmdOutput {
             stdout,
@@ -22,6 +27,7 @@ impl CmdOutput {
         }
     }
 
+    /// Creates an error command output with the given stderr and exit code.
     pub fn error(stderr: String, exit_code: i32) -> Self {
         CmdOutput {
             stdout: String::new(),
@@ -31,8 +37,12 @@ impl CmdOutput {
     }
 }
 
+/// A shell session that manages working directory, environment, and the virtual file system.
+///
+/// `ZillSession` is !Sync to optimize for single-threaded usage.
 #[derive(Serialize, Deserialize)]
 pub struct ZillSession {
+    #[serde(serialize_with = "VirtualFs::serialize_nested", deserialize_with = "VirtualFs::deserialize_nested")]
     pub vfs: VirtualFs,
     pub cwd: PathBuf,
     pub env: HashMap<String, String>,
@@ -52,10 +62,12 @@ pub struct ParsedCommand {
 }
 
 impl ZillSession {
+    /// Creates a new session with default limits.
     pub fn new() -> Self {
         Self::with_limits(ZillLimits::default())
     }
 
+    /// Creates a new session with custom resource limits.
     pub fn with_limits(limits: ZillLimits) -> Self {
         ZillSession {
             vfs: VirtualFs::new(limits.max_nodes, limits.max_file_size),
@@ -66,6 +78,7 @@ impl ZillSession {
         }
     }
 
+    /// Runs a command string and returns its output.
     pub fn run(&mut self, input: &str) -> CmdOutput {
         let parsed = match self.parse_input(input) {
             Ok(p) => p,
@@ -143,40 +156,16 @@ impl ZillSession {
         Ok(())
     }
 
+    /// Serializes the session to a human-readable nested JSON format.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        #[derive(Serialize)]
-        struct ReadableSession<'a> {
-            #[serde(serialize_with = "VirtualFs::serialize_nested")]
-            vfs: &'a VirtualFs,
-            cwd: &'a PathBuf,
-            env: &'a HashMap<String, String>,
-            limits: &'a ZillLimits,
-        }
-
-        let readable = ReadableSession {
-            vfs: &self.vfs,
-            cwd: &self.cwd,
-            env: &self.env,
-            limits: &self.limits,
-        };
-
-        serde_json::to_string_pretty(&readable)
+        serde_json::to_string_pretty(&self)
     }
 
+    /// Deserializes a session from its JSON representation.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        // Since to_json produces a nested structure that from_json (derived) can't parse,
-        // we should probably have from_json handle the standard derived serialization.
-        // Or better, let's keep standard serialization for roundtrips and to_json for readability.
-        // Actually, the requirement was for to_json/from_json to be for agent turn persistence.
-        // If the agent needs to parse it back, it should probably be the same format.
-        // But the nested format is what the user specifically asked for "nested JSON for readability".
-        // Let's use bincode for roundtrip tests in stress tests, and fix this test to use standard serialization if it must.
-
-        // Wait, if I use a different format for to_json, I broke from_json.
-        // Let's make from_json parse what to_json produces? That's hard because it's lossy (rebuilding the flat map).
-
-        // Let's provide a standard to_json_compact and to_json_readable.
-        serde_json::from_str(json)
+        let mut session: Self = serde_json::from_str(json)?;
+        session._not_sync = PhantomData;
+        Ok(session)
     }
 
     fn execute_builtin(&mut self, name: &str, args: &[String]) -> Result<CmdOutput, ZillError> {
@@ -230,7 +219,7 @@ mod tests {
         session.run("echo 'hello' > /test/hi.txt");
         session.cwd = PathBuf::from("/test");
 
-        let json = serde_json::to_string(&session).unwrap();
+        let json = session.to_json().unwrap();
         let mut session2 = ZillSession::from_json(&json).unwrap();
 
         assert_eq!(session2.cwd, PathBuf::from("/test"));
@@ -261,15 +250,21 @@ mod tests {
         session.run("mkdir -p /a/b/c");
         session.run("touch /a/b/f1.txt");
         session.run("touch /a/b/c/f2.rs");
+        session.run("touch /.hidden");
 
         let out = session.run("fd");
         assert!(out.stdout.contains("/a"));
         assert!(out.stdout.contains("/a/b"));
         assert!(out.stdout.contains("/a/b/f1.txt"));
         assert!(out.stdout.contains("/a/b/c/f2.rs"));
+        assert!(!out.stdout.contains(".hidden"));
 
         let out = session.run("fd -e rs");
         assert!(!out.stdout.contains("f1.txt"));
         assert!(out.stdout.contains("f2.rs"));
+
+        let out = session.run("fd f1");
+        assert!(out.stdout.contains("f1.txt"));
+        assert!(!out.stdout.contains("f2.rs"));
     }
 }

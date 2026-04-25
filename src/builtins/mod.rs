@@ -29,15 +29,6 @@ struct CatArgs {
 
 #[derive(Parser)]
 #[command(no_binary_name = true)]
-struct EchoArgs {
-    #[arg(short = 'n')]
-    no_newline: bool,
-    #[arg(trailing_var_arg = true)]
-    text: Vec<String>,
-}
-
-#[derive(Parser)]
-#[command(no_binary_name = true)]
 struct MkdirArgs {
     #[arg(short = 'p')]
     parents: bool,
@@ -213,6 +204,10 @@ impl ZillSession {
     pub fn builtin_rm(&mut self, args: &[String]) -> Result<CmdOutput, ZillError> {
         for arg in args {
             let path = self.vfs.canonicalize(Path::new(arg), &self.cwd);
+            let node = self.vfs.stat(&path)?;
+            if node.is_dir() {
+                return Err(ZillError::RmIsDirectory(arg.clone()));
+            }
             self.vfs.remove(&path)?;
         }
         Ok(CmdOutput::success(String::new()))

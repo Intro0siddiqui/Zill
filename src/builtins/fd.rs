@@ -17,6 +17,8 @@ struct FdArgs {
     file_type: Option<String>, // f or d
     #[arg(short = 'd')]
     max_depth: Option<usize>,
+    #[arg(short = 'H', long)]
+    hidden: bool,
 }
 
 impl ZillSession {
@@ -34,7 +36,13 @@ impl ZillSession {
         let mut globset = None;
         if let Some(ref pattern) = cli.pattern {
             let mut builder = GlobSetBuilder::new();
-            builder.add(GlobBuilder::new(pattern).literal_separator(true).build().map_err(|e| ZillError::Generic(e.to_string()))?);
+            // Use substring match if it's a simple pattern
+            let glob_pattern = if !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[') {
+                format!("*{}*", pattern)
+            } else {
+                pattern.clone()
+            };
+            builder.add(GlobBuilder::new(&glob_pattern).literal_separator(false).build().map_err(|e| ZillError::Generic(e.to_string()))?);
             globset = Some(builder.build().map_err(|e| ZillError::Generic(e.to_string()))?);
         }
 
@@ -71,6 +79,13 @@ impl ZillSession {
         }
 
         let node = self.vfs.stat(current)?;
+
+        let filename = current.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+        // Skip hidden if not requested
+        if !cli.hidden && filename.starts_with('.') && filename != "." && filename != ".." {
+            return Ok(());
+        }
 
         // Check if ignored
         if let Some(gi) = gitignore {
@@ -112,7 +127,9 @@ impl ZillSession {
         }
 
         if let Node::Directory(meta) = node {
-            for child in &meta.children {
+            let mut children: Vec<_> = meta.children.iter().collect();
+            children.sort();
+            for child in children {
                 self.walk_vfs(&current.join(child), depth + 1, max_depth, results, globset, gitignore, cli)?;
             }
         }
