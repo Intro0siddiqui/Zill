@@ -266,5 +266,8 @@ mod tests {
         let out = session.run("fd f1");
         assert!(out.stdout.contains("f1.txt"));
         assert!(!out.stdout.contains("f2.rs"));
+
+        let out = session.run("fd -H .hidden");
+        assert!(out.stdout.contains(".hidden"));
     }
 }

@@ -42,6 +42,11 @@ impl Node {
 }
 
 /// An in-memory virtual file system.
+///
+/// Note: The derived Serialize and Deserialize implementations use a flat HashMap format,
+/// which is different from the human-readable nested JSON format produced by
+/// `ZillSession::to_json` and `ZillSession::from_json`. Use those methods for
+/// agent-facing serialization.
 #[derive(Serialize, Deserialize)]
 pub struct VirtualFs {
     pub nodes: HashMap<PathBuf, Node>,
@@ -273,7 +278,16 @@ impl VirtualFs {
 
         let nested: NestedVfs = Deserialize::deserialize(deserializer)?;
         let mut nodes = HashMap::new();
-        Self::flatten_nested_node(Path::new("/"), nested.nodes, &mut nodes);
+        let mut node_count = 0;
+        Self::flatten_nested_node(
+            Path::new("/"),
+            nested.nodes,
+            &mut nodes,
+            &mut node_count,
+            nested.max_nodes,
+            nested.max_file_size
+        ).map_err(serde::de::Error::custom)?;
+
         Ok(VirtualFs {
             nodes,
             max_nodes: nested.max_nodes,
@@ -281,14 +295,49 @@ impl VirtualFs {
         })
     }
 
-    fn flatten_nested_node(path: &Path, nested: NestedNode, nodes: &mut HashMap<PathBuf, Node>) {
-        nodes.insert(path.to_path_buf(), nested.node);
-        if let Some(children) = nested.children {
-            for child in children {
-                let child_path = path.join(&child.name);
-                Self::flatten_nested_node(&child_path, child, nodes);
+    fn flatten_nested_node(
+        path: &Path,
+        nested: NestedNode,
+        nodes: &mut HashMap<PathBuf, Node>,
+        node_count: &mut usize,
+        max_nodes: usize,
+        max_file_size: usize,
+    ) -> Result<(), String> {
+        *node_count += 1;
+        if *node_count > max_nodes {
+            return Err("max nodes exceeded during deserialization".to_string());
+        }
+
+        let mut node = nested.node;
+        if let Node::File(ref meta) = node {
+            if meta.content.len() > max_file_size {
+                return Err(format!("file {} exceeds max file size during deserialization", path.display()));
             }
         }
+
+        if let Some(children) = nested.children {
+            if let Node::Directory(ref mut meta) = node {
+                let mut children_set = HashSet::new();
+                for child in children {
+                    if child.name.is_empty() || child.name == "." || child.name == ".." || child.name.contains('/') {
+                        return Err(format!("invalid child name '{}' at {}", child.name, path.display()));
+                    }
+                    if !children_set.insert(child.name.clone()) {
+                        return Err(format!("duplicate child name '{}' at {}", child.name, path.display()));
+                    }
+                    let child_path = path.join(&child.name);
+                    Self::flatten_nested_node(&child_path, child, nodes, node_count, max_nodes, max_file_size)?;
+                }
+                meta.children = children_set;
+            } else {
+                return Err(format!("node at {} has children but is not a directory", path.display()));
+            }
+        } else if let Node::Directory(ref mut meta) = node {
+            meta.children.clear();
+        }
+
+        nodes.insert(path.to_path_buf(), node);
+        Ok(())
     }
 
     fn get_nested_node(&self, path: &Path, name: &str) -> Result<NestedNode, ZillError> {

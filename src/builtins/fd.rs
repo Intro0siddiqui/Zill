@@ -37,7 +37,13 @@ impl ZillSession {
         if let Some(ref pattern) = cli.pattern {
             let mut builder = GlobSetBuilder::new();
             // Use substring match if it's a simple pattern
-            let glob_pattern = if !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[') {
+            let is_simple = !pattern.contains('*') &&
+                            !pattern.contains('?') &&
+                            !pattern.contains('[') &&
+                            !pattern.contains('{') &&
+                            !pattern.contains('\\');
+
+            let glob_pattern = if is_simple {
                 format!("*{}*", pattern)
             } else {
                 pattern.clone()
@@ -56,7 +62,7 @@ impl ZillSession {
         }
 
         let mut results = Vec::new();
-        self.walk_vfs(&search_path, 0, cli.max_depth, &mut results, &globset, &gitignore, &cli)?;
+        self.walk_vfs(&search_path, &search_path, 0, cli.max_depth, &mut results, &globset, &gitignore, &cli)?;
 
         results.sort();
         Ok(CmdOutput::success(results.join("\n") + if results.is_empty() { "" } else { "\n" }))
@@ -64,6 +70,7 @@ impl ZillSession {
 
     fn walk_vfs(
         &self,
+        search_root: &Path,
         current: &Path,
         depth: usize,
         max_depth: Option<usize>,
@@ -82,8 +89,8 @@ impl ZillSession {
 
         let filename = current.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
-        // Skip hidden if not requested
-        if !cli.hidden && filename.starts_with('.') && filename != "." && filename != ".." {
+        // Skip hidden if not requested, UNLESS it's the search root
+        if !cli.hidden && filename.starts_with('.') && filename != "." && filename != ".." && current != search_root {
             return Ok(());
         }
 
@@ -130,7 +137,7 @@ impl ZillSession {
             let mut children: Vec<_> = meta.children.iter().collect();
             children.sort();
             for child in children {
-                self.walk_vfs(&current.join(child), depth + 1, max_depth, results, globset, gitignore, cli)?;
+                self.walk_vfs(search_root, &current.join(child), depth + 1, max_depth, results, globset, gitignore, cli)?;
             }
         }
 

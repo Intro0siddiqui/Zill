@@ -204,7 +204,7 @@ impl ZillSession {
     pub fn builtin_rm(&mut self, args: &[String]) -> Result<CmdOutput, ZillError> {
         for arg in args {
             let path = self.vfs.canonicalize(Path::new(arg), &self.cwd);
-            let node = self.vfs.stat(&path).map_err(|_| ZillError::RmNotFound(arg.clone()))?;
+            let node = self.vfs.stat(&path)?;
             if node.is_dir() {
                 return Err(ZillError::RmIsDirectory(arg.clone()));
             }
