@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+/// Error types returned by Zill operations.
+///
+/// Most error messages match GNU coreutils wording.
 #[derive(Error, Debug, Clone)]
 pub enum ZillError {
     #[error("ls: {0}: No such file or directory")]
