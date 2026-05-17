@@ -10,6 +10,7 @@ pub mod session;
 pub mod builtins;
 pub mod error;
 pub mod limits;
+pub mod parser;
 
 pub use session::ZillSession;
 pub use limits::ZillLimits;

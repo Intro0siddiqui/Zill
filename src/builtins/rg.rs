@@ -1,10 +1,10 @@
-use crate::session::{ZillSession, CmdOutput};
+use crate::session::ZillSession;
 use crate::error::ZillError;
 use clap::Parser;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{Searcher, Sink, SinkMatch, SinkContext};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::io;
 
 #[derive(Parser, Debug)]
 #[command(no_binary_name = true)]
@@ -78,10 +78,19 @@ impl<'a> Sink for ZillSink<'a> {
 }
 
 impl ZillSession {
-    pub fn builtin_rg(&self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    pub fn builtin_rg(
+        &self,
+        args: &[String],
+        _stdin: &mut dyn Read,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+    ) -> Result<i32, ZillError> {
         let cli = match RgArgs::try_parse_from(args) {
             Ok(cli) => cli,
-            Err(e) => return Ok(CmdOutput::error(e.to_string(), 1)),
+            Err(e) => {
+                writeln!(stderr, "{}", e).map_err(|e| ZillError::Generic(e.to_string()))?;
+                return Ok(1);
+            }
         };
 
         let matcher = RegexMatcherBuilder::new()
@@ -129,7 +138,9 @@ impl ZillSession {
                     }
 
                     total_match_count += match_count;
-                    if total_match_count >= self.limits.max_match_count || total_output.len() > self.limits.max_output_size {
+                    if total_match_count >= self.limits.max_match_count
+                        || total_output.len() > self.limits.max_output_size
+                    {
                         break;
                     }
                 }
@@ -139,7 +150,8 @@ impl ZillSession {
             }
         }
 
-        Ok(CmdOutput::success(total_output))
+        write!(stdout, "{}", total_output).map_err(|e| ZillError::Generic(e.to_string()))?;
+        Ok(0)
     }
 
     fn collect_files_recursive(&self, path: &Path, files: &mut Vec<PathBuf>) -> Result<(), ZillError> {
