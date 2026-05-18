@@ -1,11 +1,12 @@
 pub mod rg;
 pub mod fd;
 
-use crate::session::{ZillSession, CmdOutput};
+use crate::session::ZillSession;
 use crate::error::ZillError;
 use crate::fs::Node;
 use clap::Parser;
 use std::path::Path;
+use std::io;
 
 #[derive(Parser)]
 #[command(no_binary_name = true)]
@@ -36,27 +37,52 @@ struct MkdirArgs {
 }
 
 impl ZillSession {
-    pub fn builtin_pwd(&self, _args: &[String]) -> Result<CmdOutput, ZillError> {
-        Ok(CmdOutput::success(format!("{}\n", self.cwd.display())))
+    /// Prints the current working directory to stdout.
+    pub fn builtin_pwd(
+        &self,
+        _args: &[String],
+        _stdin: &mut dyn io::Read,
+        stdout: &mut dyn io::Write,
+        _stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
+        writeln!(stdout, "{}", self.cwd.display()).map_err(|e| ZillError::Generic(e.to_string()))?;
+        Ok(0)
     }
 
-    pub fn builtin_cd(&mut self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Changes the current working directory.
+    pub fn builtin_cd(
+        &mut self,
+        args: &[String],
+        _stdin: &mut dyn io::Read,
+        _stdout: &mut dyn io::Write,
+        _stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
         let target = args.get(0).map(|s| s.as_str()).unwrap_or("/");
         let new_path = self.vfs.canonicalize(Path::new(target), &self.cwd);
 
         let node = self.vfs.stat(&new_path)?;
         if node.is_dir() {
             self.cwd = new_path;
-            Ok(CmdOutput::success(String::new()))
+            Ok(0)
         } else {
             Err(ZillError::NotADirectory(target.to_string()))
         }
     }
 
-    pub fn builtin_ls(&self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Lists directory contents.
+    pub fn builtin_ls(
+        &self,
+        args: &[String],
+        _stdin: &mut dyn io::Read,
+        stdout: &mut dyn io::Write,
+        stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
         let cli = match LsArgs::try_parse_from(args) {
             Ok(cli) => cli,
-            Err(e) => return Ok(CmdOutput::error(e.to_string(), 1)),
+            Err(e) => {
+                writeln!(stderr, "{}", e).map_err(|e| ZillError::Generic(e.to_string()))?;
+                return Ok(1);
+            }
         };
 
         let paths = if cli.paths.is_empty() {
@@ -65,10 +91,9 @@ impl ZillSession {
             cli.paths
         };
 
-        let mut output = String::new();
         for (i, path_str) in paths.iter().enumerate() {
             if paths.len() > 1 {
-                output.push_str(&format!("{}:\n", path_str));
+                writeln!(stdout, "{}:", path_str).map_err(|e| ZillError::Generic(e.to_string()))?;
             }
             let canonical = self.vfs.canonicalize(Path::new(path_str), &self.cwd);
             let node = self.vfs.stat(&canonical)?;
@@ -97,53 +122,82 @@ impl ZillSession {
                                 Node::File(m) => (m.size, m.modified_at),
                                 Node::Directory(m) => (4096, m.modified_at),
                             };
-                            output.push_str(&format!("{}rwxr-xr-x 1 zill zill {:>8} {} {}\n",
-                                type_char, size, date.format("%b %d %H:%M"), entry));
+                            writeln!(
+                                stdout,
+                                "{}rwxr-xr-x 1 zill zill {:>8} {} {}",
+                                type_char,
+                                size,
+                                date.format("%b %d %H:%M"),
+                                entry
+                            )
+                            .map_err(|e| ZillError::Generic(e.to_string()))?;
                         } else if cli.one_per_line {
-                            output.push_str(&format!("{}\n", entry));
+                            writeln!(stdout, "{}", entry).map_err(|e| ZillError::Generic(e.to_string()))?;
                         } else {
-                            output.push_str(&format!("{}  ", entry));
+                            write!(stdout, "{}  ", entry).map_err(|e| ZillError::Generic(e.to_string()))?;
                         }
                     }
                     if !cli.long && !cli.one_per_line {
-                        output.push('\n');
+                        writeln!(stdout).map_err(|e| ZillError::Generic(e.to_string()))?;
                     }
                 }
                 Node::File(_) => {
-                    output.push_str(&format!("{}\n", path_str));
+                    writeln!(stdout, "{}", path_str).map_err(|e| ZillError::Generic(e.to_string()))?;
                 }
             }
             if i < paths.len() - 1 {
-                output.push('\n');
+                writeln!(stdout).map_err(|e| ZillError::Generic(e.to_string()))?;
             }
         }
 
-        Ok(CmdOutput::success(output))
+        Ok(0)
     }
 
-    pub fn builtin_cat(&self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Concatenates files and prints them to stdout.
+    ///
+    /// If no files are provided, it reads from stdin.
+    pub fn builtin_cat(
+        &self,
+        args: &[String],
+        stdin: &mut dyn io::Read,
+        stdout: &mut dyn io::Write,
+        stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
         let cli = match CatArgs::try_parse_from(args) {
             Ok(cli) => cli,
-            Err(e) => return Ok(CmdOutput::error(e.to_string(), 1)),
+            Err(e) => {
+                writeln!(stderr, "{}", e).map_err(|e| ZillError::Generic(e.to_string()))?;
+                return Ok(1);
+            }
         };
 
-        let mut output = String::new();
-        for path_str in cli.paths {
-            let path = self.vfs.canonicalize(Path::new(&path_str), &self.cwd);
-            let content = self.vfs.read(&path)?;
-            let text = String::from_utf8_lossy(content);
-            if cli.number {
-                for (i, line) in text.lines().enumerate() {
-                    output.push_str(&format!("{:>6}  {}\n", i + 1, line));
+        if cli.paths.is_empty() {
+            io::copy(stdin, stdout).map_err(|e| ZillError::Generic(e.to_string()))?;
+        } else {
+            for path_str in cli.paths {
+                let path = self.vfs.canonicalize(Path::new(&path_str), &self.cwd);
+                let content = self.vfs.read(&path)?;
+                let text = String::from_utf8_lossy(content);
+                if cli.number {
+                    for (i, line) in text.lines().enumerate() {
+                        writeln!(stdout, "{:>6}  {}", i + 1, line).map_err(|e| ZillError::Generic(e.to_string()))?;
+                    }
+                } else {
+                    write!(stdout, "{}", text).map_err(|e| ZillError::Generic(e.to_string()))?;
                 }
-            } else {
-                output.push_str(&text);
             }
         }
-        Ok(CmdOutput::success(output))
+        Ok(0)
     }
 
-    pub fn builtin_echo(&self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Prints the given arguments to stdout.
+    pub fn builtin_echo(
+        &self,
+        args: &[String],
+        _stdin: &mut dyn io::Read,
+        stdout: &mut dyn io::Write,
+        _stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
         let mut no_newline = false;
         let mut text_parts = Vec::new();
         let mut iter = args.iter();
@@ -158,17 +212,29 @@ impl ZillSession {
             }
         }
 
-        let mut output = text_parts.join(" ");
-        if !no_newline {
-            output.push('\n');
+        let output = text_parts.join(" ");
+        if no_newline {
+            write!(stdout, "{}", output).map_err(|e| ZillError::Generic(e.to_string()))?;
+        } else {
+            writeln!(stdout, "{}", output).map_err(|e| ZillError::Generic(e.to_string()))?;
         }
-        Ok(CmdOutput::success(output))
+        Ok(0)
     }
 
-    pub fn builtin_mkdir(&mut self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Creates directories.
+    pub fn builtin_mkdir(
+        &mut self,
+        args: &[String],
+        _stdin: &mut dyn io::Read,
+        _stdout: &mut dyn io::Write,
+        stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
         let cli = match MkdirArgs::try_parse_from(args) {
             Ok(cli) => cli,
-            Err(e) => return Ok(CmdOutput::error(e.to_string(), 1)),
+            Err(e) => {
+                writeln!(stderr, "{}", e).map_err(|e| ZillError::Generic(e.to_string()))?;
+                return Ok(1);
+            }
         };
 
         for path_str in cli.paths {
@@ -187,21 +253,35 @@ impl ZillSession {
                 self.vfs.mkdir_p(&path)?;
             }
         }
-        Ok(CmdOutput::success(String::new()))
+        Ok(0)
     }
 
-    pub fn builtin_touch(&mut self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Updates the timestamp of a file or creates it if it doesn't exist.
+    pub fn builtin_touch(
+        &mut self,
+        args: &[String],
+        _stdin: &mut dyn io::Read,
+        _stdout: &mut dyn io::Write,
+        _stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
         for arg in args {
             let path = self.vfs.canonicalize(Path::new(arg), &self.cwd);
             match self.vfs.stat(&path) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(_) => self.vfs.create_file(&path, Vec::new())?,
             }
         }
-        Ok(CmdOutput::success(String::new()))
+        Ok(0)
     }
 
-    pub fn builtin_rm(&mut self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Removes files.
+    pub fn builtin_rm(
+        &mut self,
+        args: &[String],
+        _stdin: &mut dyn io::Read,
+        _stdout: &mut dyn io::Write,
+        _stderr: &mut dyn io::Write,
+    ) -> Result<i32, ZillError> {
         for arg in args {
             let path = self.vfs.canonicalize(Path::new(arg), &self.cwd);
             let node = self.vfs.stat(&path)?;
@@ -210,6 +290,6 @@ impl ZillSession {
             }
             self.vfs.remove(&path)?;
         }
-        Ok(CmdOutput::success(String::new()))
+        Ok(0)
     }
 }

@@ -1,10 +1,11 @@
-use crate::session::{ZillSession, CmdOutput};
+use crate::session::ZillSession;
 use crate::error::ZillError;
 use crate::fs::Node;
 use clap::Parser;
 use globset::{GlobBuilder, GlobSetBuilder};
 use std::path::Path;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use std::io::{Read, Write};
 
 #[derive(Parser, Debug)]
 #[command(no_binary_name = true)]
@@ -22,16 +23,23 @@ struct FdArgs {
 }
 
 impl ZillSession {
-    pub fn builtin_fd(&self, args: &[String]) -> Result<CmdOutput, ZillError> {
+    /// Finds files and directories in the virtual file system.
+    pub fn builtin_fd(
+        &self,
+        args: &[String],
+        _stdin: &mut dyn Read,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+    ) -> Result<i32, ZillError> {
         let cli = match FdArgs::try_parse_from(args) {
             Ok(cli) => cli,
-            Err(e) => return Ok(CmdOutput::error(e.to_string(), 1)),
+            Err(e) => {
+                writeln!(stderr, "{}", e).map_err(|e| ZillError::Generic(e.to_string()))?;
+                return Ok(1);
+            }
         };
 
-        let search_path = self.vfs.canonicalize(
-            Path::new(cli.path.as_deref().unwrap_or(".")),
-            &self.cwd
-        );
+        let search_path = self.vfs.canonicalize(Path::new(cli.path.as_deref().unwrap_or(".")), &self.cwd);
 
         let mut globset = None;
         if let Some(ref pattern) = cli.pattern {
@@ -62,10 +70,21 @@ impl ZillSession {
         }
 
         let mut results = Vec::new();
-        self.walk_vfs(&search_path, &search_path, 0, cli.max_depth, &mut results, &globset, &gitignore, &cli)?;
+        self.walk_vfs(
+            &search_path,
+            &search_path,
+            0,
+            cli.max_depth,
+            &mut results,
+            &globset,
+            &gitignore,
+            &cli,
+        )?;
 
         results.sort();
-        Ok(CmdOutput::success(results.join("\n") + if results.is_empty() { "" } else { "\n" }))
+        let output = results.join("\n") + if results.is_empty() { "" } else { "\n" };
+        write!(stdout, "{}", output).map_err(|e| ZillError::Generic(e.to_string()))?;
+        Ok(0)
     }
 
     fn walk_vfs(
